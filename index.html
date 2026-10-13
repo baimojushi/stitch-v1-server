@@ -98,9 +98,21 @@ function connectControl() {
     controlWs.onerror = () => { console.log('Control WS error'); };
 }
 
+let seq = 0;
+
 function sendControl(data) {
+    // P0: align with Unity RemoteInputPacket schema
+    const packet = {
+        seq: ++seq,
+        moveX: data.x || 0,
+        moveY: data.y || 0,
+        lookX: 0,
+        lookY: 0,
+        interact: data.pressed || false,
+        reset: data.reset || false
+    };
     if (controlWs && controlWs.readyState === WebSocket.OPEN) {
-        controlWs.send(JSON.stringify(data));
+        controlWs.send(JSON.stringify(packet));
     }
 }
 
@@ -109,10 +121,25 @@ async function doOffer() {
         pc = new RTCPeerConnection({
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
+
+        // P0: add video recvonly transceiver so Offer contains m=video
+        pc.addTransceiver('video', { direction: 'recvonly' });
         
         pc.ontrack = (event) => {
             video.srcObject = event.streams[0];
             updateStatus('视频流连接 ✓');
+        };
+
+        // P0: send ICE candidates (Trickle ICE)
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                ws.send(JSON.stringify({
+                    type: 'ice-candidate',
+                    candidate: event.candidate.candidate,
+                    sdpMid: event.candidate.sdpMid,
+                    sdpMLineIndex: event.candidate.sdpMLineIndex
+                }));
+            }
         };
         
         pc.onconnectionstatechange = () => {
@@ -147,13 +174,6 @@ function handleSignaling(msg) {
         case 'ice-candidate':
             pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
             break;
-    }
-}
-
-function sendControl(data) {
-    // Send control via the same WebSocket (multiplexed)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ ...data, type: 'control', ...data }));
     }
 }
 
@@ -225,8 +245,8 @@ useBtn.addEventListener('mousedown', (e) => { e.preventDefault(); sendControl({ 
 useBtn.addEventListener('touchend', (e) => { e.preventDefault(); sendControl({ type: 'use', pressed: false }); });
 useBtn.addEventListener('mouseup', (e) => { e.preventDefault(); sendControl({ type: 'use', pressed: false }); });
 
-resetBtn.addEventListener('touchstart', (e) => { e.preventDefault(); sendControl({ type: 'reset' }); });
-resetBtn.addEventListener('mousedown', (e) => { e.preventDefault(); sendControl({ type: 'reset' }); });
+resetBtn.addEventListener('touchstart', (e) => { e.preventDefault(); sendControl({ type: 'reset', reset: true }); });
+resetBtn.addEventListener('mousedown', (e) => { e.preventDefault(); sendControl({ type: 'reset', reset: true }); });
 
 setupJoystick(moveJoystick, moveJoystick.querySelector('.knob'), 'move');
 setupJoystick(lookJoystick, lookJoystick.querySelector('.knob'), 'look');
