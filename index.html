@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>STITCH-V1 控制器</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#111; touch-action:none; }
+  #app { width:100%; height:100%; display:flex; flex-direction:column; }
+  #videoContainer { width:100%; height:100%; position:relative; }
+  #remoteVideo { width:100%; height:100%; object-fit:cover; background:#000; }
+  .joystick-area { position:absolute; bottom:0; left:0; right:0; display:flex; gap:10px; padding:10px; pointer-events:none; z-index:10; }
+  .joystick { flex:1; position:relative; background:rgba(255,255,255,0.1); border-radius:50%; aspect-ratio:1; pointer-events:auto; }
+  .joystick .knob { position:absolute; width:60px; height:60px; border-radius:50%; background:rgba(255,255,255,0.8); left:50%; top:50%; transform:translate(-50%,-50%); }
+  .button-panel { display:flex; flex-direction:column; gap:10px; padding:10px; width:120px; pointer-events:auto; }
+  .btn { flex:1; background:rgba(255,255,255,0.2); border:2px solid rgba(255,255,255,0.5); border-radius:12px; color:#fff; font-size:16px; display:flex; align-items:center; justify-content:center; }
+  .btn:active { background:rgba(255,255,255,0.5); }
+  .btn.reset { background:rgba(255,100,100,0.3); }
+  .status { position:absolute; top:10px; left:10px; padding:5px 10px; background:rgba(0,0,0,0.7); color:#0f0; font-size:12px; font-family:monospace; border-radius:4px; z-index:20; }
+  .stats { position:absolute; top:10px; right:10px; padding:5px 10px; background:rgba(0,0,0,0.7); color:#fff; font-size:10px; font-family:monospace; border-radius:4px; z-index:20; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="videoContainer">
+    <video id="remoteVideo" autoplay playsinline muted></video>
+    <div class="status" id="status">连接中...</div>
+    <div class="stats" id="stats"></div>
+    <div class="joystick-area">
+      <div class="joystick" id="moveJoystick">
+        <div class="knob"></div>
+      </div>
+      <div class="joystick" id="lookJoystick">
+        <div class="knob"></div>
+      </div>
+      <div class="button-panel">
+        <div class="btn" id="useBtn">USE</div>
+        <div class="btn reset" id="resetBtn">RESET</div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const statusEl = document.getElementById('status');
+const statsEl = document.getElementById('stats');
+const moveJoystick = document.getElementById('moveJoystick');
+const lookJoystick = document.getElementById('lookJoystick');
+const useBtn = document.getElementById('useBtn');
+const resetBtn = document.getElementById('resetBtn');
+const video = document.getElementById('remoteVideo');
+
+let ws;           // WebRTC signaling WebSocket
+let controlWs;    // Control WebSocket (port 8766)
+let pc;
+let wsReconnectTimer = null;
+let controlReconnectTimer = null;
+
+function updateStatus(msg) {
+    statusEl.textContent = msg;
+}
+
+function updateStats(stats) {
+    statsEl.textContent = stats;
+}
+
+function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // WebRTC signaling on 8082
+    const signalingUrl = `${proto}//${location.hostname}:8082/ws`;
+    
+    ws = new WebSocket(signalingUrl);
+    ws.onopen = () => { updateStatus('信令连接 ✓'); doOffer(); };
+    ws.onclose = () => { updateStatus('信令断开，重连中...'); scheduleReconnect(); };
+    ws.onerror = () => { updateStatus('信令错误'); };
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleSignaling(msg);
+    };
+    
+    // Also connect control WebSocket
+    connectControl();
+}
+
+function scheduleReconnect() {
+    if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = setTimeout(connect, 2000);
+}
+
+function connectControl() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    controlWs = new WebSocket(`${proto}//${location.hostname}:8766`);
+    controlWs.onopen = () => { console.log('Control WS connected'); };
+    controlWs.onclose = () => { 
+        console.log('Control WS disconnected, reconnecting...'); 
+        controlReconnectTimer = setTimeout(connectControl, 2000); 
+    };
+    controlWs.onerror = () => { console.log('Control WS error'); };
+}
+
+function sendControl(data) {
+    if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+        controlWs.send(JSON.stringify(data));
+    }
+}
+
+async function doOffer() {
+    try {
+        pc = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+        
+        pc.ontrack = (event) => {
+            video.srcObject = event.streams[0];
+            updateStatus('视频流连接 ✓');
+        };
+        
+        pc.onconnectionstatechange = () => {
+            updateStatus(`WebRTC: ${pc.connectionState}`);
+        };
+        
+        pc.oniceconnectionstatechange = () => {
+            if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+                updateStatus('WebRTC 连接成功 ✓');
+            }
+        };
+        
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        
+        // Send offer via WebSocket signaling
+        ws.send(JSON.stringify({
+            type: 'offer',
+            sdp: pc.localDescription.sdp
+        }));
+    } catch (e) {
+        console.error('Offer error:', e);
+        updateStatus('Offer 失败: ' + e.message);
+    }
+}
+
+function handleSignaling(msg) {
+    switch (msg.type) {
+        case 'answer':
+            pc.setRemoteDescription(new RTCSessionDescription(msg));
+            break;
+        case 'ice-candidate':
+            pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            break;
+    }
+}
+
+function sendControl(data) {
+    // Send control via the same WebSocket (multiplexed)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ ...data, type: 'control', ...data }));
+    }
+}
+
+// Stats display
+setInterval(() => {
+    if (pc && pc.connectionState === 'connected') {
+        pc.getStats().then(stats => {
+            let statsStr = '';
+            stats.forEach(report => {
+                if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                    statsStr = `${report.framesDecoded || 0}帧 ${(report.bytesReceived / 1024).toFixed(0)}KB/s ${report.jitter || 0}ms`;
+                }
+            });
+            updateStats(statsStr);
+        });
+    }
+}, 1000);
+
+// Joystick setup (same as before)
+function setupJoystick(joystick, knob, action) {
+    const rect = joystick.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const maxRadius = rect.width / 2 - knob.offsetWidth / 2;
+
+    function getPos(e) {
+        const touch = e.touches ? e.touches[0] : e;
+        const x = touch.clientX - centerX;
+        const y = touch.clientY - centerY;
+        const dist = Math.min(Math.sqrt(x*x + y*y), maxRadius);
+        const angle = Math.atan2(y, x);
+        const posX = Math.cos(angle) * dist;
+        const posY = Math.sin(angle) * dist;
+        knob.style.transform = `translate(calc(-50% + ${posX}px), calc(-50% + ${posY}px))`;
+        return { x: posX / maxRadius, y: posY / maxRadius };
+    }
+
+    function reset() {
+        knob.style.transform = 'translate(-50%, -50%)';
+        sendControl({ type: action, x: 0, y: 0 });
+    }
+
+    ['touchstart', 'mousedown'].forEach(evt => {
+        joystick.addEventListener(evt, (e) => {
+            e.preventDefault();
+            const pos = getPos(e);
+            sendControl({ type: action, x: pos.x, y: pos.y });
+        });
+    });
+
+    ['touchmove', 'mousemove'].forEach(evt => {
+        joystick.addEventListener(evt, (e) => {
+            e.preventDefault();
+            const pos = getPos(e);
+            sendControl({ type: action, x: pos.x, y: pos.y });
+        });
+    });
+
+    ['touchend', 'touchcancel', 'mouseup', 'mouseleave'].forEach(evt => {
+        joystick.addEventListener(evt, (e) => {
+            e.preventDefault();
+            reset();
+        });
+    });
+}
+
+useBtn.addEventListener('touchstart', (e) => { e.preventDefault(); sendControl({ type: 'use', pressed: true }); });
+useBtn.addEventListener('mousedown', (e) => { e.preventDefault(); sendControl({ type: 'use', pressed: true }); });
+useBtn.addEventListener('touchend', (e) => { e.preventDefault(); sendControl({ type: 'use', pressed: false }); });
+useBtn.addEventListener('mouseup', (e) => { e.preventDefault(); sendControl({ type: 'use', pressed: false }); });
+
+resetBtn.addEventListener('touchstart', (e) => { e.preventDefault(); sendControl({ type: 'reset' }); });
+resetBtn.addEventListener('mousedown', (e) => { e.preventDefault(); sendControl({ type: 'reset' }); });
+
+setupJoystick(moveJoystick, moveJoystick.querySelector('.knob'), 'move');
+setupJoystick(lookJoystick, lookJoystick.querySelector('.knob'), 'look');
+
+connect();
+</script>
+</body>
+</html>

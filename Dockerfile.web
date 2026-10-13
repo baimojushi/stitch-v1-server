@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY serve_mobile.py .
+COPY index.html .
+
+EXPOSE 8091
+
+CMD ["python", "serve_mobile.py"]

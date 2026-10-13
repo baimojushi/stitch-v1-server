@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # Selkies WebRTC streaming server
+  # Connects to Unity Player running on Windows host (host.docker.internal)
+  selkies:
+    image: ghcr.io/fzwoch/selkies:latest
+    container_name: stitch-selkies
+    network_mode: "host"
+    environment:
+      - SELKIES_HOST=0.0.0.0
+      - SELKIES_PORT=8081
+      - SELKIES_CAPTURE_MODE=window
+      - SELKIES_WINDOW_TITLE=UnitySplatsGallery
+      - SELKIES_VIDEO_CODEC=h264
+      - SELKIES_BITRATE=15000
+      - SELKIES_FPS=30
+      - SELKIES_TURN_URLS=[]
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Control gateway: WebSocket (8766) -> UDP (7777 to Windows Unity Player)
+  control-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: stitch-control-gateway
+    network_mode: "host"
+    environment:
+      - GATEWAY_LISTEN=0.0.0.0
+      - GATEWAY_PORT=8766
+      - GATEWAY_UNITY_HOST=host.docker.internal
+      - GATEWAY_UNITY_PORT=7777
+    restart: unless-stopped
+    depends_on:
+      - selkies
+
+  # Mobile web controller: serves index.html on 8091
+  mobile-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: stitch-mobile-web
+    network_mode: "host"
+    environment:
+      - WEB_PORT=8091
+    restart: unless-stopped
+    depends_on:
+      - control-gateway

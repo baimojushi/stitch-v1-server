@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install websockets
+RUN pip install --no-cache-dir websockets
+
+COPY control_gateway.py .
+
+EXPOSE 8766
+
+CMD ["python", "control_gateway.py", "--listen", "0.0.0.0", "--port", "8766", "--unity-host", "host.docker.internal", "--unity-port", "7777"]
